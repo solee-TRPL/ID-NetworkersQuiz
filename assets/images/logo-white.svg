@@ -1,0 +1,17 @@
+<svg viewBox="0 0 400 80" xmlns="http://www.w3.org/2000/svg">
+  <g fill="#FFFFFF">
+    <!-- Icon -->
+    <g transform="translate(40, 40) scale(0.6)">
+      <!-- The X shape -->
+      <path d="M -20 -8 L -8 -20 L 0 -12 L 8 -20 L 20 -8 L 12 0 L 20 8 L 8 20 L 0 12 L -8 20 L -20 8 L -12 0 Z" />
+      <!-- The 4 circles -->
+      <circle cx="-35" cy="0" r="8"/>
+      <circle cx="35" cy="0" r="8"/>
+      <circle cx="0" cy="-35" r="8"/>
+      <circle cx="0" cy="35" r="8"/>
+    </g>
+    <!-- Text -->
+    <text x="90" y="32" font-family="Poppins, sans-serif" font-size="24" font-weight="800" fill="#FFFFFF" dominant-baseline="central">ID-Networkers</text>
+    <text x="90" y="55" font-family="Poppins, sans-serif" font-size="12" font-weight="500" fill="#FFFFFF" dominant-baseline="central" opacity="0.9">Indonesian IT Expert Factory</text>
+  </g>
+</svg>

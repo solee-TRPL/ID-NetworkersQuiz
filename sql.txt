@@ -1,0 +1,356 @@
+-- Enable UUID extension
+create extension if not exists "uuid-ossp";
+
+-- 1. Hosts Table (Profiles for Supabase Auth)
+create table if not exists hosts (
+  id uuid references auth.users not null primary key,
+  email text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- 2. Quizzes Table
+create table if not exists quizzes (
+  id uuid default uuid_generate_v4() primary key,
+  host_id uuid references hosts(id) not null,
+  judul text not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  tingkat_kesulitan text not null default 'sedang' check (tingkat_kesulitan in ('mudah', 'sedang', 'sulit'))
+);
+
+-- 3. Questions Table
+create table if not exists questions (
+  id uuid default uuid_generate_v4() primary key,
+  quiz_id uuid references quizzes(id) on delete cascade not null,
+  teks_soal text not null,
+  opsi_a text not null,
+  opsi_b text not null,
+  opsi_c text not null,
+  opsi_d text not null,
+  jawaban_benar text not null, -- CONSTRAINT CHECK REMOVED to allow multiple answers (e.g., 'a,b')
+  timer_detik integer not null default 20,
+  order_index integer default 0
+);
+
+-- REMOVE CONSTRAINT IF EXISTS (Safe to run multiple times)
+do $$
+begin
+  if exists (select 1 from pg_constraint where conname = 'questions_jawaban_benar_check') then
+    alter table questions drop constraint questions_jawaban_benar_check;
+  end if;
+end $$;
+
+-- 4. Rooms Table
+create table if not exists rooms (
+  id uuid default uuid_generate_v4() primary key,
+  quiz_id uuid references quizzes(id) on delete cascade not null,
+  host_id uuid references hosts(id) not null,
+  kode_room text not null unique,
+  status text not null default 'waiting' check (status in ('waiting', 'question_intro', 'running', 'question_result', 'final_leaderboard', 'podium', 'finished')),
+  current_question_index integer default 0,
+  question_start_time timestamp with time zone,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null
+);
+
+-- 5. Players Table
+create table if not exists players (
+  id uuid default uuid_generate_v4() primary key,
+  room_id uuid references rooms(id) on delete cascade not null,
+  nama text not null,
+  skor integer default 0,
+  avatar text,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  unique(room_id, nama)
+);
+
+-- 6. Player Answers Table
+create table if not exists player_answers (
+  id uuid default uuid_generate_v4() primary key,
+  player_id uuid references players(id) on delete cascade not null,
+  question_id uuid references questions(id) on delete cascade not null,
+  jawaban text not null,
+  waktu_menjawab timestamp with time zone default timezone('utc'::text, now()) not null,
+  is_correct boolean default false,
+  score_awarded integer default 0
+);
+
+-- 7. Quiz Categories Table
+create table if not exists quiz_categories (
+  id uuid default uuid_generate_v4() primary key,
+  host_id uuid references hosts(id) on delete cascade not null,
+  nama text not null,
+  created_at timestamp with time zone default timezone('utc'::text, now()) not null,
+  unique(host_id, nama)
+);
+
+-- Add category_id column to quizzes table
+alter table quizzes add column if not exists category_id uuid references quiz_categories(id) on delete set null;
+
+
+-- ENABLE RLS
+alter table hosts enable row level security;
+alter table quizzes enable row level security;
+alter table questions enable row level security;
+alter table rooms enable row level security;
+alter table players enable row level security;
+alter table player_answers enable row level security;
+alter table quiz_categories enable row level security;
+
+-- POLICIES (ATURAN KEAMANAN)
+
+-- Hosts Table Policies
+drop policy if exists "Hosts can view own data" on hosts;
+create policy "Hosts can view own data" on hosts for select using (auth.uid() = id);
+drop policy if exists "Hosts can insert own profile" on hosts;
+create policy "Hosts can insert own profile" on hosts for insert with check ((auth.uid() = id) OR (auth.role() = 'service_role'));
+
+-- Quizzes Table Policies
+drop policy if exists "Hosts can view own quizzes" on quizzes;
+create policy "Hosts can view own quizzes" on quizzes for select using (auth.uid() = host_id);
+drop policy if exists "Hosts can insert own quizzes" on quizzes;
+create policy "Hosts can insert own quizzes" on quizzes for insert with check (auth.uid() = host_id);
+drop policy if exists "Hosts can delete own quizzes" on quizzes;
+create policy "Hosts can delete own quizzes" on quizzes for delete using (auth.uid() = host_id);
+drop policy if exists "Hosts can update own quizzes" on quizzes;
+create policy "Hosts can update own quizzes" on quizzes for update using (auth.uid() = host_id);
+
+
+-- Questions Table Policies
+drop policy if exists "Hosts can view own questions" on questions;
+create policy "Hosts can view own questions" on questions for select using (
+  quiz_id in (select id from quizzes where host_id = auth.uid())
+);
+drop policy if exists "Hosts can insert own questions" on questions;
+create policy "Hosts can insert own questions" on questions for insert with check (
+  quiz_id in (select id from quizzes where host_id = auth.uid())
+);
+drop policy if exists "Hosts can delete own questions" on questions;
+create policy "Hosts can delete own questions" on questions for delete using (
+  quiz_id in (select id from quizzes where host_id = auth.uid())
+);
+drop policy if exists "Players can view questions" on questions;
+create policy "Players can view questions" on questions for select using (true); 
+
+-- Rooms Table Policies
+drop policy if exists "Public can view rooms" on rooms;
+create policy "Public can view rooms" on rooms for select using (true);
+
+drop policy if exists "Hosts can insert rooms" on rooms;
+create policy "Hosts can insert rooms" on rooms for insert with check (auth.uid() = host_id);
+drop policy if exists "Hosts can update rooms" on rooms;
+create policy "Hosts can update rooms" on rooms for update using (auth.uid() = host_id);
+drop policy if exists "Hosts can delete rooms" on rooms;
+create policy "Hosts can delete rooms" on rooms for delete using (auth.uid() = host_id);
+
+
+-- Players Table Policies
+drop policy if exists "Public can insert players" on players;
+create policy "Public can insert players" on players for insert with check (true);
+drop policy if exists "Public can view players" on players;
+create policy "Public can view players" on players for select using (true);
+drop policy if exists "Hosts can delete players from their rooms" on players;
+create policy "Hosts can delete players from their rooms" on players for delete
+using (auth.uid() = (select host_id from rooms where id = room_id));
+
+
+-- Player Answers Policies
+drop policy if exists "Public can insert answers" on player_answers; 
+drop policy if exists "Public can view answers" on player_answers;
+create policy "Public can view answers" on player_answers for select using (true);
+
+-- Quiz Categories Policies
+drop policy if exists "Hosts can manage their own categories" on quiz_categories;
+create policy "Hosts can manage their own categories" on quiz_categories for all using (auth.uid() = host_id) with check (auth.uid() = host_id);
+
+
+-- GRANT PERMISSIONS
+GRANT SELECT, INSERT ON public.hosts TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.quizzes TO authenticated;
+GRANT SELECT, INSERT, DELETE ON public.questions TO authenticated;
+GRANT INSERT, SELECT, UPDATE, DELETE ON public.rooms TO authenticated;
+GRANT SELECT, DELETE ON public.players TO authenticated;
+GRANT SELECT ON public.player_answers TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.quiz_categories TO authenticated;
+
+GRANT SELECT ON public.rooms TO anon;
+GRANT SELECT ON public.questions TO anon;
+GRANT SELECT, INSERT ON public.players TO anon;
+GRANT SELECT ON public.player_answers TO anon;
+
+
+-- FUNCTION AND TRIGGER FOR AUTOMATIC HOST PROFILE CREATION
+create or replace function public.handle_new_user()
+returns trigger
+language plpgsql
+as $$
+declare
+    new_host_id uuid := new.id;
+begin
+  -- Insert host profile
+  insert into public.hosts (id, email)
+  values (new_host_id, new.email);
+
+  -- Insert default categories for the new host
+  insert into public.quiz_categories (host_id, nama)
+  values
+    (new_host_id, 'Training'),
+    (new_host_id, 'Workshop'),
+    (new_host_id, 'Webinar');
+    
+  return new;
+end;
+$$;
+
+drop trigger if exists on_auth_user_created on auth.users;
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute procedure public.handle_new_user();
+
+
+-- NEW SCORING LOGIC (RPC FUNCTION) WITH PARTIAL SCORING AND SPEED BONUS
+-- Supports 100 pts for 1 answer, 50 pts for 2, 33 pts for 3, 25 pts for 4.
+-- Negative points for incorrect selections.
+-- Speed Bonus: +30 for 1st, +20 for 2nd, +10 for 3rd.
+
+drop policy if exists "Public can update players" on players;
+
+-- FIX: Drop the old function first because we are changing the return type signature
+drop function if exists public.submit_player_answer(uuid, uuid, text);
+
+create or replace function public.submit_player_answer(
+    p_player_id uuid,
+    p_question_id uuid,
+    p_submitted_answer text
+)
+returns table (
+    is_correct boolean, 
+    score_awarded integer,
+    correct_count integer,
+    total_needed integer,
+    speed_bonus integer
+)
+language plpgsql security definer
+as $$
+declare
+    v_correct_answer_str text;
+    v_correct_parts text[];
+    v_player_parts text[];
+    v_item text;
+    
+    v_total_needed integer;
+    v_points_per_item integer;
+    v_correct_count integer := 0;
+    v_current_score integer := 0;
+    
+    v_is_perfect boolean;
+    v_room_status text;
+    v_room_id uuid;
+    
+    v_fastest_count integer := 0;
+    v_speed_bonus integer := 0;
+begin
+    -- 1. Validate Game Status
+    select r.status, r.id into v_room_status, v_room_id
+    from public.rooms r 
+    join public.players p on r.id = p.room_id 
+    where p.id = p_player_id;
+
+    -- Allow 'question_result' to support auto-submit right when timer ends
+    if v_room_status not in ('running', 'question_intro', 'question_result') then
+      return query select false, 0, 0, 0, 0;
+      return;
+    end if;
+    
+    -- 2. Check if already answered
+    if exists (select 1 from public.player_answers where player_id = p_player_id and question_id = p_question_id) then
+        return query 
+        select pa.is_correct, pa.score_awarded, 0, 0, 0
+        from public.player_answers pa 
+        where pa.player_id = p_player_id and pa.question_id = p_question_id;
+        return;
+    end if;
+
+    -- 3. Get Correct Answer & Calculate Points Logic
+    select jawaban_benar into v_correct_answer_str from public.questions where id = p_question_id;
+    
+    -- Convert comma-separated strings to arrays
+    v_correct_parts := string_to_array(v_correct_answer_str, ',');
+    v_player_parts := string_to_array(p_submitted_answer, ',');
+    
+    v_total_needed := array_length(v_correct_parts, 1);
+    
+    -- Dynamic Scoring Formula: 100 / N (Integer division)
+    -- 1 -> 100
+    -- 2 -> 50
+    -- 3 -> 33
+    -- 4 -> 25
+    v_points_per_item := 100 / v_total_needed; 
+
+    -- 4. Calculate Score
+    -- Iterate through every answer selected by the player
+    FOREACH v_item IN ARRAY v_player_parts
+    LOOP
+        IF v_item = ANY(v_correct_parts) THEN
+            -- Correct selection: Add points
+            v_current_score := v_current_score + v_points_per_item;
+            v_correct_count := v_correct_count + 1;
+        ELSE
+            -- Incorrect selection: Subtract points (Penalty)
+            v_current_score := v_current_score - v_points_per_item;
+        END IF;
+    END LOOP;
+
+    -- Determine strictly perfect correctness for the boolean flag
+    v_is_perfect := (v_correct_count = v_total_needed) AND (array_length(v_player_parts, 1) = v_total_needed);
+
+    -- 5. Calculate Speed Bonus (Only if score is positive)
+    -- We only award bonus speed points if the base answer was overall positive (at least partially correct)
+    IF v_current_score > 0 THEN
+        -- Count how many players in this room have ALREADY answered this question with a POSITIVE score
+        SELECT count(*) INTO v_fastest_count
+        FROM public.player_answers pa
+        JOIN public.players p ON pa.player_id = p.id
+        WHERE pa.question_id = p_question_id
+          AND p.room_id = v_room_id
+          AND pa.score_awarded > 0;
+        
+        -- Apply bonus based on rank (0 means 1st person, 1 means 2nd person, etc.)
+        IF v_fastest_count = 0 THEN
+            v_speed_bonus := 30;
+        ELSIF v_fastest_count = 1 THEN
+            v_speed_bonus := 20;
+        ELSIF v_fastest_count = 2 THEN
+            v_speed_bonus := 10;
+        END IF;
+        
+        -- Add bonus to current score
+        v_current_score := v_current_score + v_speed_bonus;
+    END IF;
+    
+    -- 6. Record Answer
+    insert into public.player_answers (player_id, question_id, jawaban, is_correct, score_awarded, waktu_menjawab)
+    values (p_player_id, p_question_id, p_submitted_answer, v_is_perfect, v_current_score, now());
+
+    -- 7. Update Player Total Score
+    update public.players
+    set skor = skor + v_current_score
+    where id = p_player_id;
+
+    -- 8. Return Detailed Feedback
+    return query select v_is_perfect, v_current_score, v_correct_count, v_total_needed, v_speed_bonus;
+end;
+$$;
+
+-- Permissions
+grant execute on function public.submit_player_answer(uuid, uuid, text) to anon;
+grant execute on function public.submit_player_answer(uuid, uuid, text) to authenticated;
+
+
+-- REALTIME SETUP
+begin;
+  drop publication if exists supabase_realtime;
+  create publication supabase_realtime;
+commit;
+
+alter publication supabase_realtime add table players;
+alter publication supabase_realtime add table rooms;
+alter publication supabase_realtime add table player_answers;
